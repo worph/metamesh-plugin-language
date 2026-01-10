@@ -1,11 +1,16 @@
 /**
  * Language Plugin
- * Aggregates languages from all streams and determines primary language
- * Uses proper ISO 639 conversion matching @metazla/filename-tools
+ *
+ * Aggregates languages from all streams (audio, video, subtitle)
+ * and converts them to ISO 639-3 format.
+ * Determines the primary language based on first audio > video > subtitle stream.
+ *
+ * Matches old LanguageProcessor output:
+ * - languages (add)
+ * - titles/{lang} (set originalTitle)
  */
 
-import ISO6391 from 'iso-639-1';
-import { iso6393To2T } from 'iso-639-3';
+import { anyTo_iso_639_3 } from '@metazla/filename-tools';
 import type { PluginManifest, ProcessRequest, CallbackPayload } from './types.js';
 import { MetaCoreClient } from './meta-core-client.js';
 
@@ -22,44 +27,9 @@ export const manifest: PluginManifest = {
     timeout: 30000,
     schema: {
         languages: { label: 'Languages', type: 'array', readonly: true },
-        primaryLanguage: { label: 'Primary Language', type: 'string', readonly: true },
     },
     config: {},
 };
-
-// Build ISO 639-1 to ISO 639-3 mapping (matching @metazla/filename-tools)
-const iso6391To3: Record<string, string> = {};
-for (const key in iso6393To2T) {
-    const value = (iso6393To2T as Record<string, string>)[key];
-    iso6391To3[value] = key;
-}
-
-/**
- * Convert any language format to ISO 639-3
- * Matches anyTo_iso_639_3 from @metazla/filename-tools
- */
-function anyTo_iso_639_3(languageName: string): string | null {
-    if (!languageName) {
-        return null;
-    }
-    if (languageName.length === 3) {
-        // Could be ISO 639-3 or ISO 639-2T or ISO 639-2B
-        // All 3 are similar, just return the input
-        return languageName;
-    }
-    if (languageName.length === 2) {
-        // Could be ISO 639-1 => validate and convert
-        return iso6391To3[languageName] || 'und';
-    }
-
-    // Full language name - convert to ISO 639-3
-    const code1 = ISO6391.getCode(languageName);
-    if (iso6391To3[code1]) {
-        return iso6391To3[code1];
-    }
-
-    return null;
-}
 
 export async function process(
     request: ProcessRequest,
@@ -71,56 +41,67 @@ export async function process(
     try {
         const { cid, existingMeta } = request;
 
-        const languages = new Set<string>();
-        let primaryLanguage: string | null = null;
+        let streamLanguage: string | null = null;
 
-        // Collect from audio streams (highest priority)
+        // Collect languages from title keys (if existingMeta has titles/*)
+        for (const key of Object.keys(existingMeta || {})) {
+            if (key.startsWith('titles/')) {
+                const langCode = key.substring(7); // Remove 'titles/' prefix
+                const normalized = anyTo_iso_639_3(langCode);
+                if (normalized) {
+                    await metaCore.addToSet(cid, 'languages', normalized);
+                }
+            }
+        }
+
+        // Collect languages from audio streams (highest priority for primary)
         for (let i = 0; i < 20; i++) {
             const lang = existingMeta?.[`fileinfo/streamdetails/audio/${i}/language`];
             if (!lang) break;
             const computedLanguage = anyTo_iso_639_3(lang);
-            if (computedLanguage && computedLanguage !== 'und') {
-                languages.add(computedLanguage);
-                if (!primaryLanguage) primaryLanguage = computedLanguage;
+            if (computedLanguage) {
+                await metaCore.addToSet(cid, 'languages', computedLanguage);
+                if (!streamLanguage) {
+                    streamLanguage = computedLanguage;
+                }
             }
         }
 
-        // Collect from video streams
+        // Collect languages from video streams
         for (let i = 0; i < 20; i++) {
             const lang = existingMeta?.[`fileinfo/streamdetails/video/${i}/language`];
             if (!lang) break;
             const computedLanguage = anyTo_iso_639_3(lang);
-            if (computedLanguage && computedLanguage !== 'und') {
-                languages.add(computedLanguage);
-                if (!primaryLanguage) primaryLanguage = computedLanguage;
+            if (computedLanguage) {
+                await metaCore.addToSet(cid, 'languages', computedLanguage);
+                if (!streamLanguage) {
+                    streamLanguage = computedLanguage;
+                }
             }
         }
 
-        // Collect from subtitle streams
+        // Collect languages from subtitle streams
         for (let i = 0; i < 20; i++) {
             const lang = existingMeta?.[`fileinfo/streamdetails/subtitle/${i}/language`];
             if (!lang) break;
             const computedLanguage = anyTo_iso_639_3(lang);
-            if (computedLanguage && computedLanguage !== 'und') {
-                languages.add(computedLanguage);
-                if (!primaryLanguage) primaryLanguage = computedLanguage;
+            if (computedLanguage) {
+                await metaCore.addToSet(cid, 'languages', computedLanguage);
+                if (!streamLanguage) {
+                    streamLanguage = computedLanguage;
+                }
             }
         }
 
-        // Add languages to set
-        for (const lang of languages) {
-            await metaCore.addToSet(cid, 'languages', lang);
+        // Determine the language of the media file based on:
+        // 1st audio stream, 2nd video stream, 3rd subtitle stream (first found)
+        // Assume original title is one of the stream languages or English if not found
+        const originalTitle = existingMeta?.originalTitle;
+        if (originalTitle) {
+            await metaCore.setProperty(cid, `titles/${streamLanguage || 'eng'}`, originalTitle);
         }
 
-        // Set primary language and title language mapping
-        if (primaryLanguage) {
-            await metaCore.setProperty(cid, 'primaryLanguage', primaryLanguage);
-
-            const originalTitle = existingMeta?.originalTitle;
-            if (originalTitle) {
-                await metaCore.setProperty(cid, `titles/${primaryLanguage}`, originalTitle);
-            }
-        }
+        console.log(`[language] Aggregated languages, primary: ${streamLanguage || 'none'}`);
 
         await sendCallback({
             taskId: request.taskId,
