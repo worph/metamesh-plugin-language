@@ -1,6 +1,7 @@
 {
   "name": "@metazla/plugin-language",
   "version": "1.0.0",
+  "packageManager": "pnpm@10.28.0",
   "description": "MetaMesh plugin: Aggregates languages from streams",
   "type": "module",
   "main": "dist/index.js",
