@@ -1,0 +1,21 @@
+# MetaMesh Plugin: language - Test Image
+# Builds the plugin and runs the unit tests (no ffmpeg, no network needed at runtime)
+
+FROM node:20-slim
+
+WORKDIR /app
+
+# Copy package files and install ALL dependencies (including devDependencies)
+COPY package.json tsconfig.json vitest.config.ts ./
+RUN npm install
+
+# Copy source and test files
+COPY src/ ./src/
+COPY test/ ./test/
+
+# Build the plugin (type-checks src)
+RUN npm run build
+
+ENV NODE_ENV=test
+
+CMD ["npm", "test"]

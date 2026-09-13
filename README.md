@@ -1,27 +1,36 @@
 # MetaMesh Plugin: Language
 
-A MetaMesh plugin that aggregates languages from all streams and determines the primary language.
+A MetaMesh container plugin that adds a media file's **audio-track languages**
+to the `languages/<lang3>` key-set (METADATA_KEYS.md §9).
 
-## Description
+## What it does
 
-This plugin collects language information from video, audio, and subtitle streams extracted by the FFmpeg plugin. It:
+After the `ffmpeg` plugin has stored the stream table, this plugin:
 
-- Converts language codes to ISO 639-3 format
-- Aggregates all detected languages into a set
-- Determines the primary language (first audio stream)
-- Maps titles to their detected language
+- reads the per-stream table in **either** shape: the nested `stream`
+  collection meta-sort's `/process` payload carries (array of JSON strings,
+  array of objects, JSON string, or index-keyed object) or meta-core's flat
+  `stream/{n}` keys;
+- keeps **audio** streams only (subtitle-track languages belong to
+  `subtitleLanguages/*`);
+- normalises each code onto ISO 639-2/B alpha-3 — `fr`/`fra` → `fre`,
+  `de`/`deu` → `ger`, `pt-BR` → `por` — the vocabulary the `languages:` query
+  filter and meta-watch compare against;
+- adds `languages/<code> = "true"` for each new member in one merge (`PATCH`).
+
+It never writes `und` (or `zxx`/`mis`), never writes `titles/*`, never deletes
+or overwrites any other key, and a re-run over an already-tagged record writes
+nothing. A rejected write fails the task.
 
 ## Metadata Fields
 
 | Field | Description |
 |-------|-------------|
-| `languages` | Set of all detected languages (ISO 639-3) |
-| `primaryLanguage` | Primary language code |
-| `titles/{lang}` | Title mapped to language |
+| `languages/{lang3}` | Key-set member per audio-track language (`"true"`) |
 
 ## Dependencies
 
-- Requires `ffmpeg` plugin to run first
+- Requires the `ffmpeg` plugin to run first (it writes `stream/{n}`).
 
 ## Configuration
 
@@ -36,12 +45,11 @@ No configuration required.
 | `/configure` | POST | Update configuration |
 | `/process` | POST | Process a file |
 
-## Running Locally
+## Tests
 
 ```bash
-npm install
-npm run build
-npm start
+pnpm test        # vitest, no network
+./test.sh        # same, inside Docker
 ```
 
 ## Docker
@@ -56,7 +64,6 @@ docker run -p 8080:8080 metamesh-plugin-language
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP server port |
-| `HOST` | `0.0.0.0` | HTTP server host |
 
 ## License
 

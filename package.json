@@ -2,7 +2,7 @@
   "name": "@metazla/plugin-language",
   "version": "1.0.0",
   "packageManager": "pnpm@10.28.0",
-  "description": "MetaMesh plugin: Aggregates languages from streams",
+  "description": "MetaMesh plugin: Adds audio-track languages to the languages/<lang3> key-set",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -12,8 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "fastify": "^5.0.0",
-    "@metazla/filename-tools": "github:worph/filename-tool"
+    "fastify": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

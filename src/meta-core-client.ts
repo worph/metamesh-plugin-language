@@ -32,13 +32,14 @@ export class MetaCoreClient {
         return data.value ?? null;
     }
 
-    async mergeMetadata(hashId: string, metadata: Record<string, string>): Promise<void> {
+    /** PATCH (merge). Resolves `true` only when the write was accepted. */
+    async mergeMetadata(hashId: string, metadata: Record<string, string>): Promise<boolean> {
         const response = await this.safeFetch(`${this.baseUrl}/meta/${hashId}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(metadata),
         });
-        // Silently ignore errors (expected in standalone/test mode)
+        return !!response && response.ok;
     }
 
     async deleteProperty(hashId: string, key: string): Promise<void> {

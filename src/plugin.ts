@@ -1,24 +1,48 @@
 /**
  * Language Plugin
  *
- * Aggregates languages from all streams (audio, video, subtitle)
- * and converts them to ISO 639-3 format.
- * Determines the primary language based on first audio > video > subtitle stream.
+ * Adds the record's AUDIO languages to the `languages/<lang3>` key-set
+ * (METADATA_KEYS.md §9), read from the ffmpeg plugin's per-stream table.
  *
- * Matches old LanguageProcessor output:
- * - languages (add)
- * - titles/{lang} (set originalTitle)
+ * What it writes — and only this:
+ *   languages/<code> = "true"      one member per distinct audio-track language
+ *
+ * ⚠ Stream shape. meta-sort's /process payload is the NESTED document form
+ * (`stream: [ '<json>', ... ]`, `fileinfo: { duration }`), not meta-core's flat
+ * `stream/{n}` keys; and the legacy `fileinfo/streamdetails/{type}/{i}/language`
+ * keys this plugin used to read are written by nobody into the store (ffmpeg
+ * only puts `streamdetails` in its local cache JSON). Reading the legacy keys
+ * made every task a silent no-op. Both current shapes are accepted here.
+ *
+ * ⚠ Vocabulary. Codes are folded onto ISO 639-2/B alpha-3 (`fre`, `ger`,
+ * `chi`) — the space the `languages:` query filter compares against literally
+ * (meta-search `query_eval::languages_filter_matches`), the one meta-watch's
+ * `MW_LANG.toLang3` and the feeder SDK's `normalize_lang_code` emit, and what
+ * Matroska stream tags already carry. A `fra` member would be dropped by a
+ * `languages:fre` filter.
+ *
+ * ⚠ Audio only. Consumers read `languages/*` as the AUDIO-language set
+ * (meta-watch `cards::audio_languages`); subtitle-track languages belong to
+ * `subtitleLanguages/*` (subtitle-extractor). Title keys are not a source
+ * either: `titles/<lang>` names the language of a TITLE (tmdb files
+ * `originalTitle` under `original_language`), not of the file's audio.
+ *
+ * ⚠ No `titles/*` write. The old `titles/{firstAudioLang || 'eng'}` =
+ * `originalTitle` guess overwrote better identity (tmdb, jellyfin-nfo,
+ * anime-detector own those keys) — the overwrite-regression class.
+ *
+ * Never writes `und` (registry: an undetermined language is the absence of a
+ * member), never deletes, never overwrites a non-`languages/` key.
  */
 
-import { anyTo_iso_639_3 } from '@metazla/filename-tools';
 import type { PluginManifest, ProcessRequest, CallbackPayload } from './types.js';
 import { MetaCoreClient } from './meta-core-client.js';
 
 export const manifest: PluginManifest = {
     id: 'language',
     name: 'Language Aggregator',
-    version: '1.0.0',
-    description: 'Aggregates languages from all streams and determines primary language',
+    version: '1.1.0',
+    description: 'Adds audio-track languages to the languages/<lang3> key-set',
     author: 'MetaMesh',
     dependencies: ['ffmpeg'],
     priority: 40,
@@ -31,77 +55,168 @@ export const manifest: PluginManifest = {
     config: {},
 };
 
+/** One entry of the ffmpeg plugin's stream table (only the fields read here). */
+export interface StreamEntry {
+    type?: string;
+    index?: number;
+    language?: string;
+}
+
+/**
+ * The ffmpeg stream table out of whichever shape the payload carries.
+ *
+ * Mirrors still-extractor's `selectPrimaryVideoStream` parsing: the nested
+ * `stream` collection (array of JSON strings, array of objects, a JSON string,
+ * or an index-keyed object) first, then meta-core's flat `stream/{n}` keys.
+ * Malformed entries are skipped, never fatal.
+ */
+export function streamsFromMeta(existingMeta: Record<string, unknown> | undefined): StreamEntry[] {
+    if (!existingMeta) return [];
+
+    const raw: unknown[] = [];
+
+    const nested = existingMeta['stream'];
+    if (nested) {
+        try {
+            const parsed = typeof nested === 'string' ? JSON.parse(nested) : nested;
+            if (Array.isArray(parsed)) raw.push(...parsed);
+            else if (parsed && typeof parsed === 'object') raw.push(...Object.values(parsed as Record<string, unknown>));
+        } catch {
+            // fall through to the namespaced form
+        }
+    }
+
+    if (raw.length === 0) {
+        const flat = Object.entries(existingMeta)
+            .filter(([key]) => /^stream\/\d+$/.test(key))
+            .sort(([a], [b]) => Number(a.slice(7)) - Number(b.slice(7)));
+        for (const [, value] of flat) raw.push(value);
+    }
+
+    const streams: StreamEntry[] = [];
+    for (const entry of raw) {
+        let stream: unknown;
+        try {
+            stream = typeof entry === 'string' ? JSON.parse(entry) : entry;
+        } catch {
+            continue;
+        }
+        if (stream && typeof stream === 'object' && !Array.isArray(stream)) {
+            streams.push(stream as StreamEntry);
+        }
+    }
+    return streams;
+}
+
+// ISO 639-2/T → 639-2/B, the only codes where the two disagree. MP4's `mdhd`
+// speaks T, Matroska speaks B, ffmpeg passes through either. Mirrors
+// meta-watch `ui/js/lang-codes.js` T2B.
+const T2B: Record<string, string> = {
+    sqi: 'alb', hye: 'arm', eus: 'baq', mya: 'bur', ces: 'cze',
+    zho: 'chi', cym: 'wel', deu: 'ger', nld: 'dut', ell: 'gre', fas: 'per',
+    fra: 'fre', kat: 'geo', isl: 'ice', mkd: 'mac', msa: 'may',
+    ron: 'rum', slk: 'slo',
+};
+
+// ISO 639-1 → 639-2/B. Mirrors meta-watch `lang-codes.js` (its `a1` column plus
+// the legacy/regional two-letter aliases).
+const A1: Record<string, string> = {
+    en: 'eng', fr: 'fre', de: 'ger', es: 'spa', it: 'ita', pt: 'por', nl: 'dut',
+    sv: 'swe', no: 'nor', da: 'dan', fi: 'fin', is: 'ice', pl: 'pol', cs: 'cze',
+    sk: 'slo', sl: 'slv', hu: 'hun', ro: 'rum', bg: 'bul', ru: 'rus', uk: 'ukr',
+    be: 'bel', sr: 'srp', hr: 'hrv', bs: 'bos', mk: 'mac', sq: 'alb', el: 'gre',
+    tr: 'tur', he: 'heb', ar: 'ara', fa: 'per', ur: 'urd', hi: 'hin', bn: 'ben',
+    ta: 'tam', te: 'tel', ml: 'mal', kn: 'kan', mr: 'mar', gu: 'guj', pa: 'pan',
+    ne: 'nep', si: 'sin', th: 'tha', lo: 'lao', km: 'khm', my: 'bur', vi: 'vie',
+    id: 'ind', ms: 'may', tl: 'tgl', ja: 'jpn', ko: 'kor', zh: 'chi', mn: 'mon',
+    kk: 'kaz', uz: 'uzb', az: 'aze', ka: 'geo', hy: 'arm', et: 'est', lv: 'lav',
+    lt: 'lit', ca: 'cat', gl: 'glg', eu: 'baq', cy: 'wel', ga: 'gle', af: 'afr',
+    sw: 'swa', am: 'amh', zu: 'zul', la: 'lat', eo: 'epo', yi: 'yid', jv: 'jav',
+    // legacy / regional
+    nb: 'nor', nn: 'nor', iw: 'heb', in: 'ind', ji: 'yid', jw: 'jav',
+};
+
+// "This track has no language" spellings. Never written (registry §9).
+const NONE = new Set(['und', 'zxx', 'mis', 'unknown', 'none', '']);
+
+/**
+ * Canonical 639-2/B alpha-3 for a stream-tag language code; `''` when the
+ * track declares no language. Accepts 639-1 (`ja`), 639-2/B (`jpn`), 639-2/T
+ * (`deu` → `ger`) and BCP-47 (`pt-BR` → `por`). An unrecognised 3-letter code
+ * passes through lowercased (still a distinguishable language); anything else
+ * is dropped rather than guessed. `mul` is kept — it is a valid member.
+ * Same rules as meta-watch `MW_LANG.toLang3`.
+ */
+export function toLang3(code: unknown): string {
+    const s = String(code ?? '').trim().toLowerCase();
+    if (!s) return '';
+    const primary = s.split(/[-_]/)[0];
+    if (NONE.has(primary)) return '';
+    if (!/^[a-z]+$/.test(primary)) return '';
+    if (primary.length === 2) return A1[primary] ?? '';
+    if (primary.length === 3) return T2B[primary] ?? primary;
+    return '';
+}
+
+/** Distinct canonical audio-track languages, in stream order. */
+export function audioLanguagesFromMeta(existingMeta: Record<string, unknown> | undefined): string[] {
+    const out: string[] = [];
+    for (const stream of streamsFromMeta(existingMeta)) {
+        if (stream.type !== 'audio') continue;
+        const lang = toLang3(stream.language);
+        if (lang && !out.includes(lang)) out.push(lang);
+    }
+    return out;
+}
+
+/**
+ * Whether the record already carries `languages/<code>`, in either shape: the
+ * flat key, or the nested `languages: { <code>: ... }` object meta-sort's
+ * reconstructed document holds.
+ */
+function hasMember(existingMeta: Record<string, unknown> | undefined, code: string): boolean {
+    if (!existingMeta) return false;
+    if (existingMeta[`languages/${code}`] !== undefined) return true;
+    const nested = existingMeta['languages'];
+    return !!nested && typeof nested === 'object' && !Array.isArray(nested)
+        && (nested as Record<string, unknown>)[code] !== undefined;
+}
+
+/** The `languages/<code>` members to add — never one the record already has. */
+export function languageWrites(existingMeta: Record<string, unknown> | undefined): Record<string, string> {
+    const writes: Record<string, string> = {};
+    for (const code of audioLanguagesFromMeta(existingMeta)) {
+        if (!hasMember(existingMeta, code)) writes[`languages/${code}`] = 'true';
+    }
+    return writes;
+}
+
+/** The subset of the meta-core client this plugin uses (injectable for tests). */
+export interface LanguageWriter {
+    mergeMetadata(hashId: string, metadata: Record<string, string>): Promise<boolean>;
+}
+
 export async function process(
     request: ProcessRequest,
-    sendCallback: (payload: CallbackPayload) => Promise<void>
+    sendCallback: (payload: CallbackPayload) => Promise<void>,
+    writer: LanguageWriter = new MetaCoreClient(request.metaCoreUrl),
 ): Promise<void> {
     const startTime = Date.now();
-    const metaCore = new MetaCoreClient(request.metaCoreUrl);
 
     try {
-        const { cid, existingMeta } = request;
+        const { cid } = request;
+        const existingMeta = request.existingMeta as Record<string, unknown> | undefined;
+        const found = audioLanguagesFromMeta(existingMeta);
+        const writes = languageWrites(existingMeta);
 
-        let streamLanguage: string | null = null;
-
-        // Collect languages from title keys (if existingMeta has titles/*)
-        for (const key of Object.keys(existingMeta || {})) {
-            if (key.startsWith('titles/')) {
-                const langCode = key.substring(7); // Remove 'titles/' prefix
-                const normalized = anyTo_iso_639_3(langCode);
-                if (normalized) {
-                    await metaCore.addToSet(cid, 'languages', normalized);
-                }
-            }
+        if (Object.keys(writes).length > 0) {
+            // One PATCH (merge) carrying only the new members: additive and
+            // idempotent, touches no other key.
+            const ok = await writer.mergeMetadata(cid, writes);
+            if (!ok) throw new Error(`failed to write ${Object.keys(writes).join(', ')}`);
         }
 
-        // Collect languages from audio streams (highest priority for primary)
-        for (let i = 0; i < 20; i++) {
-            const lang = existingMeta?.[`fileinfo/streamdetails/audio/${i}/language`];
-            if (!lang) break;
-            const computedLanguage = anyTo_iso_639_3(lang);
-            if (computedLanguage) {
-                await metaCore.addToSet(cid, 'languages', computedLanguage);
-                if (!streamLanguage) {
-                    streamLanguage = computedLanguage;
-                }
-            }
-        }
-
-        // Collect languages from video streams
-        for (let i = 0; i < 20; i++) {
-            const lang = existingMeta?.[`fileinfo/streamdetails/video/${i}/language`];
-            if (!lang) break;
-            const computedLanguage = anyTo_iso_639_3(lang);
-            if (computedLanguage) {
-                await metaCore.addToSet(cid, 'languages', computedLanguage);
-                if (!streamLanguage) {
-                    streamLanguage = computedLanguage;
-                }
-            }
-        }
-
-        // Collect languages from subtitle streams
-        for (let i = 0; i < 20; i++) {
-            const lang = existingMeta?.[`fileinfo/streamdetails/subtitle/${i}/language`];
-            if (!lang) break;
-            const computedLanguage = anyTo_iso_639_3(lang);
-            if (computedLanguage) {
-                await metaCore.addToSet(cid, 'languages', computedLanguage);
-                if (!streamLanguage) {
-                    streamLanguage = computedLanguage;
-                }
-            }
-        }
-
-        // Determine the language of the media file based on:
-        // 1st audio stream, 2nd video stream, 3rd subtitle stream (first found)
-        // Assume original title is one of the stream languages or English if not found
-        const originalTitle = existingMeta?.originalTitle;
-        if (originalTitle) {
-            await metaCore.setProperty(cid, `titles/${streamLanguage || 'eng'}`, originalTitle);
-        }
-
-        console.log(`[language] Aggregated languages, primary: ${streamLanguage || 'none'}`);
+        console.log(`[language] ${cid}: audio languages [${found.join(', ') || 'none'}], added [${Object.keys(writes).join(', ') || 'none'}]`);
 
         await sendCallback({
             taskId: request.taskId,
