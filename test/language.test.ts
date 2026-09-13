@@ -187,7 +187,7 @@ describe('process', () => {
     });
 
     it('never writes titles/* or any non-languages key, even with originalTitle and title keys', async () => {
-        const { writer } = await run(nestedDoc({ 'titles/eng': 'Better Title', titles: { jpn: '番組' } }));
+        const { writer } = await run(nestedDoc({ 'titles/eng/Better Title': 'true', titles: { jpn: { '番組': 'true' } } }));
         const keys = writer.calls.flatMap((c) => Object.keys(c.metadata));
         expect(keys.length).toBeGreaterThan(0);
         expect(keys.every((k) => k.startsWith('languages/'))).toBe(true);
@@ -195,7 +195,7 @@ describe('process', () => {
     });
 
     it('does not derive languages from title keys', async () => {
-        const { callback, writer } = await run({ originalTitle: 'x', 'titles/jpn': 'y', 'titles/jpl': 'z' });
+        const { callback, writer } = await run({ originalTitle: 'x', 'titles/jpn/y': 'true', 'titles/jpl/z': 'true' });
         expect(callback?.status).toBe('completed');
         expect(writer.calls).toEqual([]);
     });
