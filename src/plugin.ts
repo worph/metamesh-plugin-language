@@ -21,11 +21,17 @@
  * Matroska stream tags already carry. A `fra` member would be dropped by a
  * `languages:fre` filter.
  *
- * ⚠ Audio only. Consumers read `languages/*` as the AUDIO-language set
- * (meta-watch `cards::audio_languages`); subtitle-track languages belong to
- * `subtitleLanguages/*` (subtitle-extractor). Title keys are not a source
- * either: `titles/<lang>` names the language of a TITLE (tmdb files
- * `originalTitle` under `original_language`), not of the file's audio.
+ * ⚠ Audio only as a SOURCE — but it writes two keys, not one. This plugin reads
+ * audio tracks, so the codes it finds are audio languages and land in
+ * `audioLanguages/<lang3>`; every one of them is ALSO written to
+ * `languages/<lang3>`, the union that queries filter on (METADATA_KEYS §9,
+ * rule #7 — "a union field is written, never computed"). Nothing reconciles the
+ * two after the fact, so a record with the split set and the union unset is
+ * invisible to every language filter on every peer. Subtitle-track languages
+ * belong to `subtitleLanguages/*` (subtitle-extractor), which owes the union
+ * member for the same reason. Title keys are not a source either:
+ * `titles/<lang>` names the language of a TITLE (tmdb files `originalTitle`
+ * under `original_language`), not of the file's audio.
  *
  * ⚠ No `titles/*` write. The old `titles/{firstAudioLang || 'eng'}` =
  * `originalTitle` guess overwrote better identity (tmdb, jellyfin-nfo,
@@ -41,8 +47,8 @@ import { MetaCoreClient } from './meta-core-client.js';
 export const manifest: PluginManifest = {
     id: 'language',
     name: 'Language Aggregator',
-    version: '1.1.0',
-    description: 'Adds audio-track languages to the languages/<lang3> key-set',
+    version: '1.2.0',
+    description: 'Adds audio-track languages to the audioLanguages/<lang3> and languages/<lang3> key-sets',
     author: 'MetaMesh',
     dependencies: ['ffmpeg'],
     priority: 40,
@@ -50,6 +56,7 @@ export const manifest: PluginManifest = {
     defaultQueue: 'fast',
     timeout: 30000,
     schema: {
+        audioLanguages: { label: 'Audio languages', type: 'array', readonly: true },
         languages: { label: 'Languages', type: 'array', readonly: true },
     },
     config: {},
@@ -170,23 +177,41 @@ export function audioLanguagesFromMeta(existingMeta: Record<string, unknown> | u
 }
 
 /**
- * Whether the record already carries `languages/<code>`, in either shape: the
- * flat key, or the nested `languages: { <code>: ... }` object meta-sort's
- * reconstructed document holds.
+ * Whether the record already carries `<field>/<code>`, in either shape: the flat
+ * key, or the nested `<field>: { <code>: ... }` object meta-sort's reconstructed
+ * document holds.
  */
-function hasMember(existingMeta: Record<string, unknown> | undefined, code: string): boolean {
+function hasMember(
+    existingMeta: Record<string, unknown> | undefined,
+    field: string,
+    code: string,
+): boolean {
     if (!existingMeta) return false;
-    if (existingMeta[`languages/${code}`] !== undefined) return true;
-    const nested = existingMeta['languages'];
+    if (existingMeta[`${field}/${code}`] !== undefined) return true;
+    const nested = existingMeta[field];
     return !!nested && typeof nested === 'object' && !Array.isArray(nested)
         && (nested as Record<string, unknown>)[code] !== undefined;
 }
 
-/** The `languages/<code>` members to add — never one the record already has. */
+/**
+ * The members to add — never one the record already has.
+ *
+ * Each audio code is written TWICE: once to `audioLanguages/<code>` (what this
+ * plugin actually observed — a spoken track) and once to `languages/<code>`
+ * (the union every query filters on). METADATA_KEYS §9 rule #7 makes the second
+ * write mandatory, not a convenience: the union is stored, never computed, and
+ * a query cannot ask for `audioLanguages OR subtitleLanguages` — the gateway
+ * wire ANDs across keys, so an OR of the splits would return strictly less.
+ */
 export function languageWrites(existingMeta: Record<string, unknown> | undefined): Record<string, string> {
     const writes: Record<string, string> = {};
     for (const code of audioLanguagesFromMeta(existingMeta)) {
-        if (!hasMember(existingMeta, code)) writes[`languages/${code}`] = 'true';
+        if (!hasMember(existingMeta, 'audioLanguages', code)) {
+            writes[`audioLanguages/${code}`] = 'true';
+        }
+        if (!hasMember(existingMeta, 'languages', code)) {
+            writes[`languages/${code}`] = 'true';
+        }
     }
     return writes;
 }

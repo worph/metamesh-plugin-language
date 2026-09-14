@@ -164,18 +164,47 @@ describe('audioLanguagesFromMeta', () => {
 });
 
 describe('languageWrites', () => {
-    it('skips members already present in the flat or nested form', () => {
-        expect(languageWrites(nestedDoc({ 'languages/jpn': 'true' }))).toEqual({ 'languages/eng': 'true' });
-        expect(languageWrites(nestedDoc({ languages: { eng: 'true', jpn: true } }))).toEqual({});
+    it('writes each audio code to BOTH the split and the union (METADATA_KEYS §9 rule #7)', () => {
+        expect(languageWrites(nestedDoc())).toEqual({
+            'audioLanguages/jpn': 'true',
+            'languages/jpn': 'true',
+            'audioLanguages/eng': 'true',
+            'languages/eng': 'true',
+        });
+    });
+
+    it('skips members already present in the flat or nested form, per field', () => {
+        // The union is already there; the split is not — the record still owes
+        // the split, and vice versa. The two are tracked independently.
+        expect(languageWrites(nestedDoc({ 'languages/jpn': 'true' }))).toEqual({
+            'audioLanguages/jpn': 'true',
+            'audioLanguages/eng': 'true',
+            'languages/eng': 'true',
+        });
+        expect(languageWrites(nestedDoc({ languages: { eng: 'true', jpn: true } }))).toEqual({
+            'audioLanguages/jpn': 'true',
+            'audioLanguages/eng': 'true',
+        });
+        expect(
+            languageWrites(nestedDoc({ audioLanguages: { eng: 'true', jpn: 'true' }, languages: { eng: 'true', jpn: 'true' } })),
+        ).toEqual({});
     });
 });
 
 describe('process', () => {
-    it('writes the audio languages/* key-set from the nested payload in one merge', async () => {
+    it('writes the audio split AND the union from the nested payload in one merge', async () => {
         const { callback, writer } = await run(nestedDoc());
         expect(callback?.status).toBe('completed');
         expect(writer.calls).toEqual([
-            { hashId: 'cid-1', metadata: { 'languages/jpn': 'true', 'languages/eng': 'true' } },
+            {
+                hashId: 'cid-1',
+                metadata: {
+                    'audioLanguages/jpn': 'true',
+                    'languages/jpn': 'true',
+                    'audioLanguages/eng': 'true',
+                    'languages/eng': 'true',
+                },
+            },
         ]);
     });
 
@@ -183,14 +212,27 @@ describe('process', () => {
         const flat = Object.fromEntries(REAL_STREAMS.map((s, i) => [`stream/${i}`, s]));
         const { callback, writer } = await run(flat);
         expect(callback?.status).toBe('completed');
-        expect(writer.calls[0].metadata).toEqual({ 'languages/jpn': 'true', 'languages/eng': 'true' });
+        expect(writer.calls[0].metadata).toEqual({
+            'audioLanguages/jpn': 'true',
+            'languages/jpn': 'true',
+            'audioLanguages/eng': 'true',
+            'languages/eng': 'true',
+        });
     });
 
-    it('never writes titles/* or any non-languages key, even with originalTitle and title keys', async () => {
+    it('every split member has a matching union member — the record is never left half-written', async () => {
+        const { writer } = await run(nestedDoc());
+        const keys = writer.calls.flatMap((c) => Object.keys(c.metadata));
+        for (const k of keys.filter((k) => k.startsWith('audioLanguages/'))) {
+            expect(keys).toContain(`languages/${k.slice('audioLanguages/'.length)}`);
+        }
+    });
+
+    it('never writes titles/* or any non-language key, even with originalTitle and title keys', async () => {
         const { writer } = await run(nestedDoc({ 'titles/eng/Better Title': 'true', titles: { jpn: { '番組': 'true' } } }));
         const keys = writer.calls.flatMap((c) => Object.keys(c.metadata));
         expect(keys.length).toBeGreaterThan(0);
-        expect(keys.every((k) => k.startsWith('languages/'))).toBe(true);
+        expect(keys.every((k) => k.startsWith('languages/') || k.startsWith('audioLanguages/'))).toBe(true);
         expect(keys.some((k) => k.startsWith('titles'))).toBe(false);
     });
 
@@ -209,8 +251,21 @@ describe('process', () => {
     });
 
     it('is idempotent: a re-run over a record that already has the members writes nothing', async () => {
-        const { writer } = await run(nestedDoc({ 'languages/jpn': 'true', 'languages/eng': 'true' }));
+        const { writer } = await run(nestedDoc({
+            'audioLanguages/jpn': 'true', 'audioLanguages/eng': 'true',
+            'languages/jpn': 'true', 'languages/eng': 'true',
+        }));
         expect(writer.calls).toEqual([]);
+    });
+
+    it('backfills the union on a record written before the split existed', async () => {
+        // Pre-1.2.0 records carry only `languages/*`. A re-run must add the
+        // split without disturbing the union that is already correct.
+        const { writer } = await run(nestedDoc({ 'languages/jpn': 'true', 'languages/eng': 'true' }));
+        expect(writer.calls[0].metadata).toEqual({
+            'audioLanguages/jpn': 'true',
+            'audioLanguages/eng': 'true',
+        });
     });
 
     it('fails the task when the write is rejected', async () => {
